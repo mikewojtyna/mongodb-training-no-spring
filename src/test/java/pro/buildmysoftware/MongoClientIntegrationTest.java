@@ -3,31 +3,39 @@ package pro.buildmysoftware;
 import com.mongodb.ConnectionString;
 import com.mongodb.MongoClientSettings;
 import com.mongodb.ReadConcern;
-import com.mongodb.client.FindIterable;
-import com.mongodb.client.MongoClient;
-import com.mongodb.client.MongoClients;
-import com.mongodb.client.MongoCollection;
-import com.mongodb.client.model.Filters;
+import com.mongodb.WriteConcern;
+import com.mongodb.client.*;
 import org.bson.Document;
 import org.bson.codecs.configuration.CodecRegistries;
 import org.bson.codecs.pojo.PojoCodecProvider;
 import org.bson.conversions.Bson;
 import org.bson.types.ObjectId;
-import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
-import org.junit.jupiter.api.DisplayName;
-import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.*;
 
+import java.util.List;
+import java.util.function.Consumer;
+
+import static com.mongodb.client.model.Accumulators.sum;
+import static com.mongodb.client.model.Aggregates.*;
 import static com.mongodb.client.model.Filters.eq;
+import static com.mongodb.client.model.Filters.gt;
+import static com.mongodb.client.model.Projections.*;
 import static org.assertj.core.api.Assertions.assertThat;
 
 public class MongoClientIntegrationTest {
 
+	private static final String DATABASE = "no-spring-db";
+	private static final String DOCUMENTS_COLLECTION = "documents";
+	private static final String POJO_COLLECTION = "pojo";
+	// @formatter:off
+	private static final String CONNECTION_STRING =
+		"mongodb://localhost:27017,localhost:27018,localhost:27019/?replicaSet=replica-set-0";
+	// @formatter:on
 	private MongoClient mongoClient;
 
 	private MongoClientSettings settings() {
 		return MongoClientSettings.builder()
-			.applyConnectionString(new ConnectionString("mongodb" + "://localhost:27017"))
+			.applyConnectionString(new ConnectionString(CONNECTION_STRING))
 			.codecRegistry(CodecRegistries
 				.fromRegistries(com.mongodb.MongoClient
 					.getDefaultCodecRegistry(),
@@ -42,13 +50,73 @@ public class MongoClientIntegrationTest {
 		mongoClient = MongoClients.create(settings());
 	}
 
+	@AfterEach
+	void closeMongoClient() {
+		mongoClient.close();
+	}
+
+	@DisplayName("query view example")
+	@Test
+	@Disabled
+	void queryView() throws Exception {
+		MongoCollection<Document> totalScoreMsg = mongoClient
+			.getDatabase(DATABASE).getCollection("totalScoreMsg");
+
+		totalScoreMsg.find()
+			.forEach((Consumer<Document>) document -> System.out
+				.println(document.toJson()));
+	}
+
+	@DisplayName("aggregate example")
+	@Test
+	void aggregate() throws Exception {
+		// given
+		MongoCollection<Document> collection = mongoClient
+			.getDatabase(DATABASE).getCollection("scoreMsg");
+		collection.insertMany(List.of(new Document("msg", "hello")
+			.append("score", 3), new Document("msg", "hello")
+			.append("score", 2), new Document("msg", "hi")
+			.append("score", 1), new Document("msg", "hello")
+			.append("score", 1)));
+
+		// when
+		AggregateIterable<Document> aggregate = collection
+			.aggregate(List.of(
+				// @formatter:off
+					match(gt("score", 1)),
+					group("$msg", sum("totalScore",
+						"$score")),
+					project(fields(computed("message",
+						"$_id"), include("totalScore")))
+					// @formatter:on
+			));
+
+		// then
+		aggregate.forEach((Consumer<Document>) document -> System.out
+			.println(document.toJson()));
+	}
+
+	@DisplayName("receive change streams update")
+	@Disabled
+	@Test
+	void changeStreams() throws Exception {
+		// given
+		MongoCollection<Document> collection = mongoClient
+			.getDatabase(DATABASE)
+			.getCollection(DOCUMENTS_COLLECTION);
+
+		// when
+		collection.watch().iterator()
+			.forEachRemaining(System.out::println);
+	}
+
 	@DisplayName("add any document example")
 	@Test
-	void test0() throws Exception {
+	void addDocument() throws Exception {
 		// given
 		MongoCollection<Document> anyCollection = mongoClient
-			.getDatabase("mongodb-training-no-spring-db")
-			.getCollection("anyCollection");
+			.getDatabase(DATABASE)
+			.getCollection(DOCUMENTS_COLLECTION);
 		Document anyDocument = new Document("msg", "hello");
 
 		// when
@@ -65,10 +133,11 @@ public class MongoClientIntegrationTest {
 	@DisplayName("use read concern example")
 	@Test
 	@Disabled
-	void test1() throws Exception {
+	void readConcern() throws Exception {
 		// given
 		MongoCollection<Document> collection = mongoClient
-			.getDatabase("user").getCollection("user")
+			.getDatabase(DATABASE)
+			.getCollection(DOCUMENTS_COLLECTION)
 			.withReadConcern(ReadConcern.MAJORITY);
 
 		// when
@@ -82,13 +151,14 @@ public class MongoClientIntegrationTest {
 		assertThat(first).isNotNull();
 	}
 
-	@DisplayName("insert document example")
+	@DisplayName("insert document using write concern example")
 	@Test
-	void test2() throws Exception {
+	void writeConcern() throws Exception {
 		// given
 		MongoCollection<Document> collection = mongoClient
-			.getDatabase("mongodb-training-no-spring-db")
-			.getCollection("anyCollection");
+			.getDatabase(DATABASE)
+			.getCollection(DOCUMENTS_COLLECTION)
+			.withWriteConcern(WriteConcern.W1);
 
 		// when
 		collection.insertOne(new Document("msg", "hello from Java"));
@@ -101,13 +171,13 @@ public class MongoClientIntegrationTest {
 			.isEqualTo("hello from Java");
 	}
 
-	@DisplayName("insert pojo")
+	@DisplayName("insert pojo example")
 	@Test
-	void test3() throws Exception {
+	void pojo() throws Exception {
 		// given
 		MongoCollection<Pojo> collection = mongoClient
-			.getDatabase("mongodb-training-no-spring-db")
-			.getCollection("pojoCollection", Pojo.class);
+			.getDatabase(DATABASE)
+			.getCollection(POJO_COLLECTION, Pojo.class);
 		Pojo pojo = new Pojo(ObjectId
 			.get(), "string 0", 1, new Pojo(ObjectId
 			.get(), "string 1", 2, null));
@@ -116,7 +186,7 @@ public class MongoClientIntegrationTest {
 		collection.insertOne(pojo);
 
 		// then
-		Bson filter = Filters.eq("_id", pojo.getId());
+		Bson filter = eq("_id", pojo.getId());
 		Pojo pojoFromDb = collection.find(filter).first();
 		assertThat(pojoFromDb).isEqualTo(pojo);
 	}
